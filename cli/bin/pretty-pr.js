@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import { program } from 'commander'
-import { assertGitRepo, getBranchName, getBaseBranch, getCommits, getDiff, getStatus } from '../src/git.js'
+import { assertGitRepo, getBranchName, getBaseBranch, getCommits, getDiff, getStatus, getCommitsBetweenTags } from '../src/git.js'
 import { generate, generateReview } from '../src/ai.js'
-import { printResult, writeToFile } from '../src/output.js'
+import { generateChangelog } from '../src/changelog.js'
+import { generateCoverageHints } from '../src/hints.js'
+import { printResult, printStreamHeader, printStreamChunk, printStreamFooter, writeToFile } from '../src/output.js'
 import { ghAvailable, parseOutput, openPR } from '../src/github.js'
+import { copyToClipboard } from '../src/clipboard.js'
 
 program
   .name('pretty-pr')
@@ -17,6 +20,10 @@ program
   .option('--open', 'create a GitHub PR with the generated copy (requires gh CLI)')
   .option('--draft', 'open as a draft PR (use with --open)')
   .option('--review', 'generate a reviewer brief instead of PR copy')
+  .option('--clipboard', 'copy output to clipboard instead of printing')
+  .option('--mode <mode>', 'generation mode: pr (default) or changelog')
+  .option('--from <ref>', 'start ref for changelog mode (tag or commit)')
+  .option('--to <ref>', 'end ref for changelog mode (default: HEAD)')
   .parse()
 
 const opts = program.opts()
@@ -40,6 +47,47 @@ if (opts.open && !ghAvailable()) {
   process.exit(1)
 }
 
+// ── Changelog mode ──────────────────────────────────────────────────────────
+if (opts.mode === 'changelog') {
+  if (!opts.from) {
+    console.error('\n  Error: --mode changelog requires --from <tag-or-ref>\n')
+    console.error('  Example: npx pretty-pr --mode changelog --from v1.2.0\n')
+    process.exit(1)
+  }
+
+  const from = opts.from
+  const to = opts.to ?? 'HEAD'
+  const commits = getCommitsBetweenTags(from, to)
+
+  if (!commits) {
+    console.error(`\n  Error: No commits found between ${from} and ${to}.\n`)
+    process.exit(1)
+  }
+
+  const date = new Date().toISOString().slice(0, 10)
+  const context = { commits, from, to, date }
+
+  console.log(`\n  Generating changelog from ${from} to ${to}...`)
+
+  try {
+    if (opts.out) {
+      // Buffer silently, then write to file
+      const result = await generateChangelog(context)
+      writeToFile(result, opts.out)
+    } else {
+      // Stream tokens live to terminal
+      printStreamHeader()
+      await generateChangelog(context, printStreamChunk)
+      printStreamFooter()
+    }
+  } catch (err) {
+    console.error(`\n  Error: ${err.message}\n`)
+    process.exit(1)
+  }
+  process.exit(0)
+}
+
+// ── PR / Review mode (default) ──────────────────────────────────────────────
 const useDiff = opts.diff || opts.full || opts.open || opts.review
 const base = getBaseBranch(opts.base)
 const branch = getBranchName()
@@ -53,14 +101,28 @@ if (!commits) {
 const diff = useDiff ? getDiff(base, opts.range) : null
 const status = opts.full ? getStatus() : null
 
-console.log(`\n  ${opts.review ? 'Generating reviewer brief' : 'Generating PR copy'}${useDiff ? ' (with diff)' : ''}...`)
-
 const context = { commits, diff, branch, status }
 
+// Stream to terminal unless we need to buffer first (--out, --open, --clipboard)
+const streamToTerminal = !opts.out && !opts.open && !opts.clipboard
+
+if (streamToTerminal) {
+  console.log(`\n  ${opts.review ? 'Generating reviewer brief' : 'Generating PR copy'}${useDiff ? ' (with diff)' : ''}...`)
+  printStreamHeader()
+} else {
+  console.log(`\n  ${opts.review ? 'Generating reviewer brief' : 'Generating PR copy'}${useDiff ? ' (with diff)' : ''}...`)
+}
+
 try {
+  const onChunk = streamToTerminal ? printStreamChunk : undefined
+
   const result = opts.review
-    ? await generateReview(diff || '')
-    : await generate(context)
+    ? await generateReview(diff || '', onChunk)
+    : await generate(context, onChunk)
+
+  if (streamToTerminal) {
+    printStreamFooter()
+  }
 
   if (opts.open) {
     printResult(result)
@@ -75,8 +137,38 @@ try {
     }
   } else if (opts.out) {
     writeToFile(result, opts.out)
-  } else {
-    printResult(result)
+    if (opts.clipboard) {
+      const clip = await copyToClipboard(result)
+      if (clip.success) {
+        console.log('  Copied to clipboard.')
+      } else {
+        console.warn(`  Warning: clipboard copy failed — ${clip.error}`)
+      }
+    }
+  } else if (opts.clipboard) {
+    const clip = await copyToClipboard(result)
+    if (clip.success) {
+      console.log('\n  Copied to clipboard.\n')
+    } else {
+      console.warn(`\n  Warning: clipboard copy failed — ${clip.error}`)
+      console.warn('  Falling back to terminal output:\n')
+      printResult(result)
+    }
+  }
+
+  // Run coverage hints pass when diff is available and not in review mode
+  if (diff && !opts.review) {
+    console.log('\n  Checking coverage...\n')
+    const YELLOW = '\x1b[33m'
+    const RESET = '\x1b[0m'
+    const BOLD = '\x1b[1m'
+    process.stdout.write(`${BOLD}${YELLOW}⚠ Coverage Hints${RESET}\n\n`)
+    try {
+      await generateCoverageHints(diff, result, (chunk) => process.stdout.write(chunk))
+      process.stdout.write('\n\n')
+    } catch {
+      // Hints are advisory — silently skip if the second pass fails
+    }
   }
 } catch (err) {
   if (err.status === 401) {

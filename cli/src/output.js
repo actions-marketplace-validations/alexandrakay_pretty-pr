@@ -1,4 +1,5 @@
 import { writeFileSync } from 'fs'
+import { scoreOutput, formatScoreBar } from './score.js'
 
 const RESET = '\x1b[0m'
 const BOLD = '\x1b[1m'
@@ -6,24 +7,44 @@ const DIM = '\x1b[2m'
 const CYAN = '\x1b[36m'
 const GREEN = '\x1b[32m'
 
+const divider = () => `${DIM}${'─'.repeat(60)}${RESET}`
+
+export function printStreamHeader() {
+  process.stdout.write(`\n${BOLD}${CYAN}✦ PRetty${RESET}\n`)
+  process.stdout.write(`${divider()}\n\n`)
+}
+
+export function printStreamChunk(chunk) {
+  process.stdout.write(chunk)
+}
+
+export function printStreamFooter() {
+  process.stdout.write(`\n\n${divider()}\n`)
+}
+
 export function printResult(text) {
-  const divider = `${DIM}${'─'.repeat(60)}${RESET}`
   console.log()
   console.log(`${BOLD}${CYAN}✦ PRetty${RESET}`)
-  console.log(divider)
+  console.log(divider())
   console.log()
 
-  // Highlight section headers
   const formatted = text.replace(
     /^(## .+)$/gm,
     `${BOLD}${GREEN}$1${RESET}`
   )
   console.log(formatted)
   console.log()
-  console.log(divider)
+  console.log(divider())
+
+  const { met, total } = scoreOutput(text)
+  const bar = formatScoreBar(met, total)
+  const scoreColor = met === total ? GREEN : DIM
+  console.log(`\n  ${DIM}Quality${RESET}  ${scoreColor}${bar}${RESET}  ${scoreColor}${BOLD}${met}/${total}${RESET}${DIM} sections complete${RESET}\n`)
 }
 
 export function writeToFile(text, filepath) {
   writeFileSync(filepath, text, 'utf8')
+  const { met, total } = scoreOutput(text)
   console.log(`\nWritten to ${filepath}`)
+  console.log(`Quality: ${formatScoreBar(met, total)}  ${met}/${total} sections complete`)
 }

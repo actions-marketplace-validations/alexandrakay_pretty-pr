@@ -65,3 +65,25 @@ export function assertGitRepo() {
     throw new Error('Not inside a git repository.')
   }
 }
+
+export function getCommitsBetweenTags(from, to = 'HEAD') {
+  try {
+    const result = run(`git log ${from}..${to} --pretty=format:"%h %s (%an, %ar)" --no-merges`)
+    return result || null
+  } catch {
+    return null
+  }
+}
+
+export function getTicketFromBranch(branchName) {
+  if (!branchName) return null
+
+  const jiraMatch = branchName.match(/\b([A-Za-z]{2,10})-(\d+)\b/)
+  if (jiraMatch) return `${jiraMatch[1].toUpperCase()}-${jiraMatch[2]}`
+
+  const slug = branchName.split('/').pop() ?? branchName
+  const numericMatch = slug.match(/^(\d+)(?:-|$)/)
+  if (numericMatch) return `#${numericMatch[1]}`
+
+  return null
+}
